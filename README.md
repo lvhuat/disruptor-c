@@ -4,6 +4,6 @@ A port of [LMAX/disruptor](https://github.com/LMAX-Exchange/disruptor),transfere
 Try example
 ------
 ```
-$ gcc main.c -o example
+$ gcc main.c -lpthread -o example
 $ ./example
 ```
