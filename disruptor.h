@@ -2,6 +2,23 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <string.h>
+#include <assert.h>
+#include <stdio.h>
+#include <time.h>
+#include <sched.h>
+
+void nano_sleep(int sec, int nsec)
+{
+    struct timespec req, rem;
+    req.tv_sec = sec;
+    req.tv_nsec = nsec;
+    nanosleep(&req, &rem);
+}
+
+void yield()
+{
+    sched_yield();
+}
 
 #define sequeue_t int
 
@@ -81,15 +98,40 @@ void *reader_recv_loop(void *p)
 {
     struct reader *r = (struct reader *)p;
     sequeue_t prev = cursor_load(r->cursor);
+    sequeue_t lower = prev + 1;
+    sequeue_t upper = barrier_read(r->barrier, lower);
+    long long wait_counter = 0;
     while (1)
     {
-        sequeue_t lower = prev + 1;
-        sequeue_t upper = barrier_read(r->barrier, lower);
         if (lower <= upper)
         {
             consumer_func_t fc = r->consumer->f;
             (*fc)(r->consumer, lower, upper);
             cursor_set(r->cursor, upper);
+            prev = upper;
+            lower = prev + 1;
+        }
+        else if (!r->running)
+        {
+            break;
+        }
+        
+        // Wait strategy
+        // Use SleepingWaitStrategy:https://bit.ly/2GhQ3ZS
+        wait_counter = 200;
+        while ((lower > (upper = barrier_read(r->barrier, 0))) && r->running)
+        {
+            if (wait_counter > 100)
+            {
+                --wait_counter;
+            }
+            else if (wait_counter > 0)
+            {
+                --wait_counter;
+                yield();
+            }
+
+            nano_sleep(0L, 1L); // -1
         }
     }
 
@@ -99,13 +141,15 @@ void *reader_recv_loop(void *p)
 void reader_start(struct reader *r)
 {
     r->running = 1;
-    pthread_create(&r->thread, NULL, reader_recv_loop, r);
+    int ret = pthread_create(&r->thread, NULL, reader_recv_loop, r);
+    assert(ret == 0);
 }
 
 void reader_stop(struct reader *r)
 {
     r->running = 0;
-    pthread_join(r->thread, NULL);
+    int ret = pthread_join(r->thread, NULL);
+    assert(ret == 0);
 }
 
 struct writer
@@ -115,10 +159,6 @@ struct writer
     sequeue_t prev;
     struct cursor *cursor;
 };
-
-void nano_sleep()
-{
-}
 
 const int SpinMask = 1024 * 16 - 1;
 
@@ -130,9 +170,8 @@ sequeue_t writer_reserve(struct writer *writer, size_t count)
     {
         if (spin & SpinMask == 0)
         {
-            nano_sleep();
+            nano_sleep(0L, 1L); // yield
         }
-
         gate = barrier_read(writer->barrier, 0);
     }
 
@@ -164,6 +203,7 @@ struct disruptor
     struct cursor *cursors;
     struct reader *readers;
     struct barrier *barriers;
+    struct consumer *consumers;
     struct writer writer;
 };
 
@@ -174,14 +214,23 @@ void disruptor_build(struct disruptor *d, const struct disruptor_options *dopt)
     {
         consumer_len += dopt->consumer_groups[group_it].consumer_len;
     }
+    d->cursor_len = consumer_len + 1;
 
-    struct cursor *cursors = (struct cursor *)malloc(sizeof(struct consumer) * (consumer_len + 1));
+    // the cursors[0] is used for the writer and the barrier of the first group.
+    struct cursor *cursors = (struct cursor *)malloc(sizeof(struct cursor) * (consumer_len + 1));
+    memset(cursors, -1, sizeof(sizeof(struct cursor) * (consumer_len + 1)));
     d->cursors = cursors;
 
-    struct reader *readers = (struct reader *)malloc(sizeof(struct consumer) * consumer_len);
+    struct consumer *consumers = (struct consumer *)malloc(sizeof(struct consumer) * (consumer_len));
+    memset(consumers, 0, sizeof(sizeof(struct consumer) * (consumer_len)));
+    d->consumers = consumers;
+
+    struct reader *readers = (struct reader *)malloc(sizeof(struct reader) * consumer_len);
+    memset(readers, 0, sizeof(sizeof(struct reader) * consumer_len));
     d->readers = readers;
 
-    struct barrier *barriers = (struct barrier *)malloc(sizeof(struct consumer) * dopt->consumer_group_len);
+    struct barrier *barriers = (struct barrier *)malloc(sizeof(struct barrier) * (dopt->consumer_group_len + 1));
+    memset(readers, 0, sizeof(struct barrier) * (dopt->consumer_group_len + 1));
     d->barriers = barriers;
 
     d->barriers[0].cursor = d->cursors;
@@ -189,20 +238,27 @@ void disruptor_build(struct disruptor *d, const struct disruptor_options *dopt)
 
     size_t cursor_index = 1;
     struct barrier *barrier = d->barriers;
+
     for (size_t group_it = 0; group_it < dopt->consumer_group_len; group_it++)
     {
         struct consumer_group *group = dopt->consumer_groups + group_it;
         sequeue_t temp_cursor_index = cursor_index;
         for (size_t consumer_it = 0; consumer_it < group->consumer_len; consumer_it++)
         {
-            struct reader *reader = d->readers + cursor_index - 1;
             struct cursor *cursor = d->cursors + cursor_index;
+
+            struct consumer *consumer = d->consumers + cursor_index - 1;
+            consumer->f = group->consumers[consumer_it].f;
+            consumer->arg = group->consumers[consumer_it].arg;
+
+            struct reader *reader = d->readers + cursor_index - 1;
             reader->cursor = cursor;
             reader->barrier = barrier;
+            reader->consumer = consumer;
             cursor_index++;
         }
 
-        barrier = d->barriers + group_it;
+        barrier = d->barriers + group_it + 1;
         barrier->cursor = d->cursors + temp_cursor_index;
         barrier->count = group->consumer_len;
     }
@@ -238,7 +294,7 @@ void disruptor_cfg_ringbuffer(struct disruptor_options *d, struct command *ring,
 
 void disruptor_start(struct disruptor *d)
 {
-    for (size_t i = 0; i < sizeof(d->readers) / sizeof(d->readers[0]); i++)
+    for (size_t i = 0; i < d->cursor_len - 1; i++)
     {
         reader_start(&d->readers[i]);
     }
@@ -246,7 +302,7 @@ void disruptor_start(struct disruptor *d)
 
 void disruptor_stop(struct disruptor *d)
 {
-    for (size_t i = 0; i < sizeof(d->readers) / sizeof(d->readers[0]); i++)
+    for (size_t i = 0; i < d->cursor_len - 1; i++)
     {
         reader_stop(&d->readers[i]);
     }
