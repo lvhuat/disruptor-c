@@ -7,6 +7,11 @@
 #include <time.h>
 #include <sched.h>
 
+#define DATA_VOLATILE volatile
+#define PADDING //long long padding[0];
+#define PADDING_BYTE(x) char padding[x];
+
+
 void nano_sleep(int sec, int nsec)
 {
     struct timespec req, rem;
@@ -20,12 +25,12 @@ void yield()
     sched_yield();
 }
 
-#define sequeue_t int
+#define sequeue_t long long
 
 struct command
 {
-    volatile long long data;
-    char padding[7];
+    long long data;
+    PADDING
 };
 
 void zero_command(struct command *cmd)
@@ -35,8 +40,8 @@ void zero_command(struct command *cmd)
 
 struct cursor
 {
-    volatile sequeue_t seq;
-    char padding[7];
+    DATA_VOLATILE sequeue_t seq;
+    PADDING
 };
 
 sequeue_t cursor_load(struct cursor *c)
@@ -53,7 +58,7 @@ struct barrier
 {
     struct cursor *cursor;
     sequeue_t count;
-    char padding[6];
+    PADDING_BYTE(48);
 };
 
 sequeue_t barrier_read(struct barrier *barrier, sequeue_t id)
@@ -92,6 +97,8 @@ struct reader
     struct consumer *consumer;
     int running;
     pthread_t thread;
+
+    PADDING_BYTE(20);
 };
 
 void *reader_recv_loop(void *p)
@@ -105,8 +112,7 @@ void *reader_recv_loop(void *p)
     {
         if (lower <= upper)
         {
-            consumer_func_t fc = r->consumer->f;
-            (*fc)(r->consumer, lower, upper);
+            (*r->consumer->f)(r->consumer, lower, upper);
             cursor_set(r->cursor, upper);
             prev = upper;
             lower = prev + 1;
@@ -115,6 +121,7 @@ void *reader_recv_loop(void *p)
         {
             break;
         }
+
         // Wait strategy
         // Use SleepingWaitStrategy:https://bit.ly/2GhQ3ZS
         wait_counter = 200;
@@ -157,6 +164,7 @@ struct writer
     struct barrier *barrier;
     sequeue_t prev;
     struct cursor *cursor;
+    PADDING_BYTE(32);
 };
 
 const int SpinMask = 1024 * 16 - 1;
@@ -293,7 +301,7 @@ void disruptor_cfg_ringbuffer(struct disruptor_options *d, struct command *ring,
     assert(len > 0);
     assert(ring != NULL);
     assert((len & (len - 1)) == 0);
-    
+
     d->ring = ring;
     d->ring_len = len;
 }
