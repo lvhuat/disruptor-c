@@ -24,7 +24,7 @@ void yield()
 
 struct command
 {
-    long long data;
+    volatile long long data;
     char padding[7];
 };
 
@@ -115,7 +115,6 @@ void *reader_recv_loop(void *p)
         {
             break;
         }
-        
         // Wait strategy
         // Use SleepingWaitStrategy:https://bit.ly/2GhQ3ZS
         wait_counter = 200;
@@ -164,17 +163,19 @@ const int SpinMask = 1024 * 16 - 1;
 
 sequeue_t writer_reserve(struct writer *writer, size_t count)
 {
-    writer->prev += count;
+    sequeue_t nextSeq = writer->prev + count;
     sequeue_t gate = barrier_read(writer->barrier, 0);
-    for (size_t spin = 0; writer->prev - writer->buffer_len < gate; spin++)
+    for (size_t spin = 0; nextSeq > gate + writer->buffer_len; spin++)
     {
         if (spin & SpinMask == 0)
         {
-            nano_sleep(0L, 1L); // yield
+            nano_sleep(0L, 1L);
         }
+
         gate = barrier_read(writer->barrier, 0);
     }
 
+    writer->prev = nextSeq;
     return writer->prev;
 }
 
@@ -266,6 +267,7 @@ void disruptor_build(struct disruptor *d, const struct disruptor_options *dopt)
     struct writer *writer = &d->writer;
     writer->barrier = barrier;
     writer->cursor = d->cursors;
+    writer->buffer_len = dopt->ring_len;
 }
 
 void disruptor_cfg_consumer_grp(struct disruptor_options *d, struct consumer *consumers, size_t len)
@@ -288,6 +290,10 @@ void disruptor_cfg_consumer_grp(struct disruptor_options *d, struct consumer *co
 
 void disruptor_cfg_ringbuffer(struct disruptor_options *d, struct command *ring, size_t len)
 {
+    assert(len > 0);
+    assert(ring != NULL);
+    assert((len & (len - 1)) == 0);
+    
     d->ring = ring;
     d->ring_len = len;
 }

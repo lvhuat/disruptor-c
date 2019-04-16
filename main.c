@@ -3,8 +3,9 @@
 #include "disruptor.h"
 #include <stdio.h>
 
-struct command ring[64 * 1000] = {};
-const long long buffer_mask = 64 * 1000 - 1;
+#define RING_LEN 64 * 1024
+struct command ring[RING_LEN] = {};
+const long long buffer_mask = RING_LEN - 1;
 const long long dur_nano = 1000000000L;
 const long long dur_milli = 1000000L;
 
@@ -49,28 +50,27 @@ struct data_consume2
 void example_consume2(struct consumer *consumer, sequeue_t lower, sequeue_t upper)
 {
     struct data_consume2 *data = (struct data_consume2 *)consumer->arg;
-    for (size_t i = lower; i <= upper; i++)
+    for (sequeue_t i = lower; i <= upper; i++)
     {
-        //printf("%ld\n", i);
+        if (ring[buffer_mask & lower].data != lower)
+        {
+            printf("Data race!!!");
+            exit(-1);
+        }
         data->num++;
-    }
-
-    if (lower % 1000 == 0)
-    {
-        printf("####%d,%d\n", lower, upper);
     }
 }
 
 void publish(struct disruptor *d)
 {
-    sequeue_t seq = writer_reserve(&d->writer, 16);
-    //printf("----%d\n", seq);
-    for (sequeue_t lower = seq - 16 + 1; lower < seq; lower++)
+    size_t next_count = 16;
+    sequeue_t max_sequeued = writer_reserve(&d->writer, next_count);
+    for (sequeue_t sequeued = max_sequeued - next_count + 1; sequeued <= max_sequeued; sequeued++)
     {
-        ring[buffer_mask & lower].data = lower; // Set event data.
+        ring[buffer_mask & sequeued].data = sequeued; // Set event data.
     }
-
-    writer_commit(&d->writer, seq - 16 + 1, seq);
+    
+    writer_commit(&d->writer, max_sequeued - next_count + 1, max_sequeued);
 }
 
 // In X-system shell, build with command-line `gcc main.c -lpthread`
@@ -103,7 +103,7 @@ int main()
     struct timespec start, finish;
     clock_gettime(CLOCK_REALTIME, &start);
 
-    for (size_t i = 0; i < 100000000; i++)
+    for (size_t i = 0; i < 10000000; i++)
     {
         publish(&d);
     }
@@ -114,5 +114,5 @@ int main()
     long long start_nano = start.tv_sec * dur_nano + start.tv_nsec;
     long long finish_nano = finish.tv_sec * dur_nano + finish.tv_nsec;
     printf("data result:%lld\n", data2.num);
-    printf("cost millisecond : %lld\n", (finish_nano-start_nano)/dur_milli);
+    printf("cost millisecond : %lld\n", (finish_nano - start_nano) / dur_milli);
 }
