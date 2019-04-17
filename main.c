@@ -95,7 +95,7 @@ void publish(struct disruptor *d)
     }
 }
 
-// In X-system shell, build with command-line `gcc main.c -lpthread`
+// In X-system shell, build with command-line `gcc main.c -lpthread -O3`
 int main()
 {
     struct disruptor_options dopt = {};
