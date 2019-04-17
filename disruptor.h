@@ -1,9 +1,7 @@
 #include <stdlib.h>
 #include <pthread.h>
-#include <unistd.h>
 #include <string.h>
 #include <assert.h>
-#include <stdio.h>
 #include <time.h>
 #include <sched.h>
 

@@ -2,6 +2,7 @@
 
 #include "disruptor.h"
 #include <stdio.h>
+#include <unistd.h>
 
 struct command
 {
